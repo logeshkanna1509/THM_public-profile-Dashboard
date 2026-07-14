@@ -14,7 +14,9 @@ export { normalizeUsername, profileUrlFor };
  * `rate_limited` so the UI can show a friendly message instead of crashing.
  *
  * Strategy:
- *   1. Fetch the public profile HTML at /p/<username> (primary source).
+ *   1. Fetch the public profile HTML at /p/<username> (primary source). If
+ *      THM_PROXY_URL is set, the request is routed through a proxy / scraping
+ *      API to bypass the WAF (required when hosted on a datacenter like Vercel).
  *   2. Parse avatar / level / rank / points / badges / rooms with several
  *      resilient selectors + regex fallbacks (markup changes over time).
  *   3. Best-effort enrichment from the v2 "badges" endpoint when a numeric
@@ -42,7 +44,12 @@ const BROWSER_HEADERS: Record<string, string> = {
 // We deliberately do NOT cache (no-store) so a transient 429 / checkpoint
 // block is never served stale to other visitors for an extended period.
 
-/* ────────────────────────────────────────────────────────────────────────── */
+// Optional upstream proxy / scraping API (e.g. ScrapingBee, ZenRows) used to
+// bypass TryHackMe's bot-protection, which blocks datacenter IPs (including
+// Vercel's). Set THM_PROXY_URL with a __URL__ placeholder, e.g.
+//   https://app.scrapingbee.com/api/v1?api_key=KEY&url=__URL__
+// or a plain ?url= endpoint. Leave empty to fetch TryHackMe directly.
+const THM_PROXY_URL = process.env.THM_PROXY_URL?.trim() || "";
 
 type HtmlFetch =
   | { status: "ok"; html: string }
@@ -50,37 +57,71 @@ type HtmlFetch =
   | { status: "rate_limited" }
   | { status: "error"; message: string };
 
-async function fetchProfileHtml(url: string): Promise<HtmlFetch> {
-  let res: Response;
+/**
+ * Fetch a TryHackMe URL, optionally through THM_PROXY_URL. Returns the raw
+ * response body (some proxies wrap HTML in JSON, e.g. { contents: "..." }).
+ */
+async function fetchThm(
+  targetUrl: string,
+): Promise<{ httpStatus: number; html: string }> {
+  const url = THM_PROXY_URL
+    ? THM_PROXY_URL.includes("__URL__")
+      ? THM_PROXY_URL.replace("__URL__", encodeURIComponent(targetUrl))
+      : `${THM_PROXY_URL}${THM_PROXY_URL.includes("?") ? "&" : "?"}url=${encodeURIComponent(targetUrl)}`
+    : targetUrl;
+
+  const res = await fetch(url, {
+    headers: THM_PROXY_URL ? {} : BROWSER_HEADERS,
+    redirect: "follow",
+    cache: "no-store",
+  });
+
+  const ct = res.headers.get("content-type") || "";
+  let html = "";
+  if (ct.includes("application/json")) {
+    try {
+      const json = await res.json();
+      const wrapped =
+        json?.contents ?? json?.html ?? json?.body ?? json?.data ?? json?.result;
+      html = typeof wrapped === "string" ? wrapped : JSON.stringify(json);
+    } catch {
+      html = await res.text();
+    }
+  } else {
+    html = await res.text();
+  }
+
+  return { httpStatus: res.status, html };
+}
+
+async function fetchProfileHtml(targetUrl: string): Promise<HtmlFetch> {
+  let fetched: { httpStatus: number; html: string };
   try {
-    res = await fetch(url, {
-      headers: BROWSER_HEADERS,
-      redirect: "follow",
-      cache: "no-store",
-    });
+    fetched = await fetchThm(targetUrl);
   } catch (err) {
     // Retry once on a transient network error.
     try {
-      res = await fetch(url, {
-        headers: BROWSER_HEADERS,
-        redirect: "follow",
-        cache: "no-store",
-      });
+      fetched = await fetchThm(targetUrl);
     } catch (err2) {
       return { status: "error", message: (err2 as Error).message };
     }
   }
 
-  if (res.status === 429) return { status: "rate_limited" };
-  if (res.status === 404) return { status: "not_found" };
-  if (!res.ok)
-    return { status: "error", message: `TryHackMe returned HTTP ${res.status}.` };
+  const { httpStatus, html } = fetched;
 
-  const html = await res.text();
+  // Status shortcuts only apply to direct (non-proxy) requests; a proxy
+  // typically returns 200 and embeds the real status in the HTML.
+  if (!THM_PROXY_URL && httpStatus === 429) return { status: "rate_limited" };
+  if (!THM_PROXY_URL && httpStatus === 404) return { status: "not_found" };
+  if (THM_PROXY_URL && httpStatus >= 400)
+    return { status: "error", message: `Proxy returned HTTP ${httpStatus}.` };
+
   if (/Vercel Security Checkpoint/i.test(html) || /security checkpoint/i.test(html))
     return { status: "rate_limited" };
   if (/user (not found|does not exist)|couldn'?t find that user/i.test(html))
     return { status: "not_found" };
+  if (!THM_PROXY_URL && httpStatus >= 400)
+    return { status: "error", message: `TryHackMe returned HTTP ${httpStatus}.` };
 
   return { status: "ok", html };
 }
@@ -148,12 +189,9 @@ async function enrichFromV2(
     const url = `https://tryhackme.com/api/v2/badges/public-profile?userPublicId=${encodeURIComponent(
       idMatch[1],
     )}`;
-    const res = await fetch(url, {
-      headers: BROWSER_HEADERS,
-      cache: "no-store",
-    });
-    if (!res.ok) return base;
-    const v2 = await res.text();
+    const { httpStatus, html: v2 } = await fetchThm(url);
+    if (THM_PROXY_URL ? httpStatus >= 400 : !httpStatus.toString().startsWith("2"))
+      return base;
     if (/Vercel Security Checkpoint/i.test(v2)) return base;
 
     const $ = cheerio.load(v2);
