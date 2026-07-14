@@ -1,0 +1,56 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+html,
+body {
+  background-color: #09090b; /* zinc-950 */
+  color: #d4d4d8; /* zinc-300 */
+}
+
+body {
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* Subtle radial glow behind the app for depth without clutter. */
+.app-backdrop {
+  background-image:
+    radial-gradient(60rem 60rem at 50% -10%, rgba(255, 77, 77, 0.06), transparent 60%),
+    radial-gradient(40rem 40rem at 100% 0%, rgba(45, 212, 191, 0.05), transparent 55%);
+}
+
+/* Minimal custom scrollbar. */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.16);
+}
+
+@layer components {
+  .card {
+    @apply rounded-2xl border border-white/10 bg-white/[0.02] p-6 backdrop-blur-sm;
+  }
+  .metric-value {
+    @apply font-mono text-4xl font-bold tracking-tight text-zinc-50 sm:text-5xl;
+  }
+  .metric-label {
+    @apply text-xs font-medium uppercase tracking-[0.18em] text-zinc-500;
+  }
+  .pill {
+    @apply inline-flex items-center gap-1.5 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs text-zinc-400;
+  }
+  .link-accent {
+    @apply text-accent transition-colors hover:text-accent-soft;
+  }
+}
