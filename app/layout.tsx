@@ -4,11 +4,11 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: {
-    default: "THM Roster — Student Monitoring Dashboard",
-    template: "%s · THM Roster",
+    default: "THM Dashboard — TryHackMe Profile Monitor",
+    template: "%s · THM Dashboard",
   },
   description:
-    "Minimalist dashboard for monitoring TryHackMe students at an institutional level.",
+    "A clean, gamified dashboard for viewing any public TryHackMe student profile.",
 };
 
 export default function RootLayout({
@@ -26,7 +26,7 @@ export default function RootLayout({
                 <span className="text-sm font-bold">T</span>
               </span>
               <span className="text-sm font-semibold tracking-tight text-zinc-200">
-                THM Roster
+                THM Dashboard
               </span>
             </Link>
             <nav className="flex items-center gap-1 text-sm">
@@ -35,12 +35,6 @@ export default function RootLayout({
                 className="rounded-lg px-3 py-1.5 text-zinc-400 transition-colors hover:bg-white/5 hover:text-zinc-100"
               >
                 Home
-              </Link>
-              <Link
-                href="/roster"
-                className="rounded-lg px-3 py-1.5 text-zinc-400 transition-colors hover:bg-white/5 hover:text-zinc-100"
-              >
-                Roster
               </Link>
             </nav>
           </header>

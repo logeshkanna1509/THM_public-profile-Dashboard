@@ -29,11 +29,11 @@ export default function HomePage() {
     <section className="flex min-h-[70vh] flex-col items-center justify-center text-center">
       <p className="pill mb-6 animate-fade-up">
         <span className="h-1.5 w-1.5 rounded-full bg-accent" />
-        Institutional TryHackMe monitoring
+        TryHackMe profile monitoring
       </p>
 
       <h1 className="animate-fade-up text-balance text-4xl font-bold tracking-tight text-zinc-50 sm:text-6xl">
-        Track your students&rsquo;
+        Track a student&rsquo;s
         <span className="text-accent"> hacking journey</span>
       </h1>
 

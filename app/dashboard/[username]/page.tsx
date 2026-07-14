@@ -1,11 +1,11 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { MetricCard } from "@/components/MetricCard";
-import { saveStudent } from "@/lib/db";
 import { profileUrlFor, scrapeProfile } from "@/lib/thm";
 import type { THMProfile } from "@/lib/types";
 
-export const revalidate = 3600; // cache each profile for an hour
+// Revalidate each profile for an hour so we don't hammer TryHackMe on every view.
+export const revalidate = 3600;
 
 type Params = { username: string };
 
@@ -28,14 +28,9 @@ function initials(name: string): string {
 // Minimalist milestone bars — normalize known metrics against round targets.
 function StandingBars({ profile }: { profile: THMProfile }) {
   const bars: { label: string; value: number; target: number; color: string }[] = [
-    { label: "Level", value: profile.level ?? 0, target: 30, color: "bg-accent" },
     { label: "Badges", value: profile.badges ?? 0, target: 50, color: "bg-cyber" },
-    {
-      label: "Rooms",
-      value: profile.roomsCompleted ?? 0,
-      target: 100,
-      color: "bg-zinc-300",
-    },
+    { label: "Rooms", value: profile.roomsCompleted ?? 0, target: 100, color: "bg-zinc-300" },
+    { label: "Streak", value: profile.streak ?? 0, target: 30, color: "bg-accent" },
   ];
 
   return (
@@ -106,13 +101,6 @@ export default async function DashboardPage({
 }) {
   const { username: encoded } = await params;
   const username = decodeURIComponent(encoded);
-
-  // Ensure viewing a profile also records it in the roster.
-  try {
-    await saveStudent({ username, profileUrl: profileUrlFor(username) });
-  } catch (err) {
-    console.error("[dashboard] failed to save student:", err);
-  }
 
   const result = await scrapeProfile(username);
 
@@ -193,16 +181,15 @@ export default async function DashboardPage({
 
       {/* Metric cards */}
       <div className="mt-10 grid grid-cols-2 gap-4 lg:grid-cols-4">
-        <MetricCard
-          label="Total Points"
-          value={p.points != null ? p.points.toLocaleString() : "—"}
-          accent="accent"
-        />
-        <MetricCard label="Level" value={p.level != null ? p.level : "—"} />
+        <MetricCard label="Rank" value={p.rank ?? "—"} accent="accent" />
         <MetricCard
           label="Badges"
           value={p.badges != null ? p.badges : "—"}
           accent="cyber"
+        />
+        <MetricCard
+          label="Streak"
+          value={p.streak != null ? p.streak : "—"}
         />
         <MetricCard
           label="Rooms Done"
@@ -210,7 +197,7 @@ export default async function DashboardPage({
         />
       </div>
 
-      {/* Standing */}
+      {/* standing */}
       <div className="mt-4">
         <StandingBars profile={p} />
       </div>

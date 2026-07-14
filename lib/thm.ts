@@ -13,14 +13,23 @@ export { normalizeUsername, profileUrlFor };
  * checkpoint page. This module detects that case explicitly and returns
  * `rate_limited` so the UI can show a friendly message instead of crashing.
  *
+ * How the metrics are obtained
+ * -----------------------------
+ * TryHackMe's public profile page is a client-rendered React app: the server
+ * HTML only contains the avatar (via og:image). The numeric stats (Rank,
+ * Badges, Completed rooms, Streak, Level, Country) are fetched by the browser
+ * after hydration. To capture them when proxying, we tell the proxy to
+ * RENDER JAVASCRIPT (e.g. ScrapingBee `render_js=True&wait=networkidle`) so the
+ * post-hydration DOM — with the stat boxes — is what we parse.
+ *
+ * Note: TryHackMe no longer exposes a user's *points* on public profiles, so
+ * `points` is always null. Use `rank` (a percentile like "Top 15%") instead.
+ *
  * Strategy:
  *   1. Fetch the public profile HTML at /p/<username> (primary source). If
  *      THM_PROXY_URL is set, the request is routed through a proxy / scraping
  *      API to bypass the WAF (required when hosted on a datacenter like Vercel).
- *   2. Parse avatar / level / rank / points / badges / rooms with several
- *      resilient selectors + regex fallbacks (markup changes over time).
- *   3. Best-effort enrichment from the v2 "badges" endpoint when a numeric
- *      userPublicId can be located in the page markup.
+ *   2. Parse avatar + the stat boxes with resilient class/substring selectors.
  */
 
 const BROWSER_HEADERS: Record<string, string> = {
@@ -41,9 +50,6 @@ const BROWSER_HEADERS: Record<string, string> = {
   "Upgrade-Insecure-Requests": "1",
 };
 
-// We deliberately do NOT cache (no-store) so a transient 429 / checkpoint
-// block is never served stale to other visitors for an extended period.
-
 // Optional upstream proxy / scraping API (e.g. ScrapingBee, ZenRows) used to
 // bypass TryHackMe's bot-protection, which blocks datacenter IPs (including
 // Vercel's). Set THM_PROXY_URL with a __URL__ placeholder, e.g.
@@ -57,18 +63,24 @@ type HtmlFetch =
   | { status: "rate_limited" }
   | { status: "error"; message: string };
 
-/**
- * Fetch a TryHackMe URL, optionally through THM_PROXY_URL. Returns the raw
- * response body (some proxies wrap HTML in JSON, e.g. { contents: "..." }).
- */
+/** Build the final upstream URL, appending JS-render params for ScrapingBee. */
+function buildProxyUrl(targetUrl: string): string {
+  const withUrl = THM_PROXY_URL.includes("__URL__")
+    ? THM_PROXY_URL.replace("__URL__", encodeURIComponent(targetUrl))
+    : `${THM_PROXY_URL}${THM_PROXY_URL.includes("?") ? "&" : "?"}url=${encodeURIComponent(targetUrl)}`;
+
+  // Render JS so client-fetched stats appear in the returned HTML.
+  if (/scrapingbee\.com/i.test(THM_PROXY_URL) && !/[?&]render_js=/i.test(withUrl)) {
+    const sep = withUrl.includes("?") ? "&" : "?";
+    return `${withUrl}${sep}render_js=True&wait=5000`;
+  }
+  return withUrl;
+}
+
 async function fetchThm(
   targetUrl: string,
 ): Promise<{ httpStatus: number; html: string }> {
-  const url = THM_PROXY_URL
-    ? THM_PROXY_URL.includes("__URL__")
-      ? THM_PROXY_URL.replace("__URL__", encodeURIComponent(targetUrl))
-      : `${THM_PROXY_URL}${THM_PROXY_URL.includes("?") ? "&" : "?"}url=${encodeURIComponent(targetUrl)}`
-    : targetUrl;
+  const url = THM_PROXY_URL ? buildProxyUrl(targetUrl) : targetUrl;
 
   const res = await fetch(url, {
     headers: THM_PROXY_URL ? {} : BROWSER_HEADERS,
@@ -99,7 +111,6 @@ async function fetchProfileHtml(targetUrl: string): Promise<HtmlFetch> {
   try {
     fetched = await fetchThm(targetUrl);
   } catch (err) {
-    // Retry once on a transient network error.
     try {
       fetched = await fetchThm(targetUrl);
     } catch (err2) {
@@ -111,8 +122,7 @@ async function fetchProfileHtml(targetUrl: string): Promise<HtmlFetch> {
 
   // Status shortcuts only apply to direct (non-proxy) requests; a proxy
   // typically returns 200 and embeds the real status in the HTML.
-  if (!THM_PROXY_URL && httpStatus === 429) return { status: "rate_limited" };
-  if (!THM_PROXY_URL && httpStatus === 404) return { status: "not_found" };
+  if (httpStatus === 404) return { status: "not_found" };
   if (THM_PROXY_URL && httpStatus >= 400)
     return { status: "error", message: `Proxy returned HTTP ${httpStatus}.` };
 
@@ -134,7 +144,6 @@ function parseProfileHtml(
   html: string,
 ): THMProfile {
   const $ = cheerio.load(html);
-  const bodyText = $("body").text();
 
   const avatarUrl =
     $('meta[property="og:image"]').attr("content") ||
@@ -142,82 +151,58 @@ function parseProfileHtml(
     $('[class*="avatar"] img').first().attr("src") ||
     null;
 
-  const level = firstNumber(bodyText, /level[:\s]*(\d+)/i) ?? countByClass($, "level");
-  const rank =
-    firstCapture(bodyText, /rank[:\s]*([A-Za-z0-9 ]+?)(?:\n|$)/i) ||
-    $("span.rank-title").first().text().trim() ||
-    null;
-  const points =
-    firstNumber(bodyText, /([\d,]+)\s*points?/i) ??
-    firstNumber(bodyText, /points?[:\s]*([\d,]+)/i);
-  const badges =
-    firstNumber(bodyText, /badges?[:\s]*(\d+)/i) ?? countByClass($, "badge");
-  const roomsCompleted =
-    firstNumber(bodyText, /(\d+)\s*rooms?\s*(?:completed|done)/i) ??
-    firstNumber(bodyText, /completed\s*rooms?[:\s]*(\d+)/i);
+  let level: number | null = toNumber($('[data-testid="level"]').first().text().trim());
+  let rank: string | null = null;
+  let badges: number | null = null;
+  let roomsCompleted: number | null = null;
+  let streak: number | null = null;
+  // TryHackMe no longer publishes a user's points on public profiles.
+  const points: number | null = null;
+
+  // Stat boxes:  <div class="*StyledStatisticsBoxText*">LABEL</div>
+  //              <div class="*StyledStatisticsBoxIconNumberContainer*">
+  //                ... <div class="*StyledStatisticsBoxNumber*">VALUE</div>
+  $('[class*="StyledStatisticsBoxText"]').each((_, el) => {
+    const label = $(el).text().trim().toLowerCase();
+    const numText = $(el)
+      .next()
+      .find('[class*="StyledStatisticsBoxNumber"]')
+      .first()
+      .text()
+      .trim();
+    const num = toNumber(numText);
+    switch (label) {
+      case "rank":
+        rank = numText || rank; // e.g. "Top 15%"
+        break;
+      case "badges":
+        badges = num ?? badges;
+        break;
+      case "completed rooms":
+        roomsCompleted = num ?? roomsCompleted;
+        break;
+      case "streak":
+        streak = num ?? streak;
+        break;
+      case "level":
+        level = num ?? level;
+        break;
+      default:
+        break;
+    }
+  });
 
   return {
     username,
     avatarUrl: avatarUrl ? toAbsoluteUrl(avatarUrl) : null,
     level,
-    rank: rank ? rank : null,
+    rank,
     points,
     badges,
     roomsCompleted,
+    streak,
     profileUrl,
   };
-}
-
-/* ────────────────────────────────────────────────────────────────────────── */
-
-/**
- * Enrich from the v2 "badges" endpoint. It returns HTML spans
- * (class `details-text`) in the order: Rank, Streak, Badges, CompletedRooms,
- * Level, plus a profile image URL in inline CSS. Requires the numeric
- * userPublicId, which we try to discover in the profile markup.
- */
-async function enrichFromV2(
-  html: string,
-  base: THMProfile,
-): Promise<THMProfile> {
-  const idMatch =
-    html.match(/userPublicId["'=:\s]+(\d+)/i) ||
-    html.match(/user_id["'=:\s]+(\d+)/i);
-  if (!idMatch) return base;
-
-  try {
-    const url = `https://tryhackme.com/api/v2/badges/public-profile?userPublicId=${encodeURIComponent(
-      idMatch[1],
-    )}`;
-    const { httpStatus, html: v2 } = await fetchThm(url);
-    if (THM_PROXY_URL ? httpStatus >= 400 : !httpStatus.toString().startsWith("2"))
-      return base;
-    if (/Vercel Security Checkpoint/i.test(v2)) return base;
-
-    const $ = cheerio.load(v2);
-    const details = $("span.details-text")
-      .map((_, el) => $(el).text().trim())
-      .get();
-
-    const pfp =
-      v2.match(/background-image:\s*url\((['"]?)([^'")]+)\1\)/i)?.[2] ||
-      v2.match(/https?:\/\/[^"')\s]+\.(?:png|jpe?g|webp)/i)?.[0] ||
-      null;
-
-    const extra: THMProfile = {
-      ...base,
-      rank: details[0] || base.rank,
-      badges: details[2] ? toNumber(details[2]) ?? base.badges : base.badges,
-      roomsCompleted: details[3]
-        ? toNumber(details[3]) ?? base.roomsCompleted
-        : base.roomsCompleted,
-      level: details[4] ? toNumber(details[4]) ?? base.level : base.level,
-      avatarUrl: pfp ? toAbsoluteUrl(pfp) : base.avatarUrl,
-    };
-    return extra;
-  } catch {
-    return base;
-  }
 }
 
 /* ────────────────────────────────────────────────────────────────────────── */
@@ -234,32 +219,18 @@ export async function scrapeProfile(raw: string): Promise<ScrapeResult> {
   if (fetched.status === "error")
     return { status: "error", message: fetched.message };
 
-  let profile = parseProfileHtml(username, profileUrl, fetched.html);
-  profile = await enrichFromV2(fetched.html, profile);
+  const profile = parseProfileHtml(username, profileUrl, fetched.html);
   return { status: "ok", profile };
 }
 
 /* ────────────────────────────────────────────────────────────────────────── */
 /* small parsing helpers                                                     */
 
-function firstNumber(text: string, re: RegExp): number | null {
-  const m = text.match(re);
-  return m ? toNumber(m[1]) : null;
-}
-
-function firstCapture(text: string, re: RegExp): string | null {
-  const m = text.match(re);
-  return m ? m[1].trim() : null;
-}
-
 function toNumber(value: string): number | null {
-  const n = Number(value.replace(/[,\s]/g, ""));
+  const v = value.trim();
+  if (!v) return null;
+  const n = Number(v.replace(/[,\s%]/g, ""));
   return Number.isFinite(n) ? n : null;
-}
-
-function countByClass($: cheerio.CheerioAPI, klass: string): number | null {
-  const count = $(`[class*="${klass}"]`).length;
-  return count > 0 ? count : null;
 }
 
 function toAbsoluteUrl(src: string): string {

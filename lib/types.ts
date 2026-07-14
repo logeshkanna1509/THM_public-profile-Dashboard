@@ -6,6 +6,7 @@ export interface THMProfile {
   points: number | null;
   badges: number | null;
   roomsCompleted: number | null;
+  streak: number | null;
   profileUrl: string;
 }
 
@@ -16,10 +17,3 @@ export type ScrapeResult =
   | { status: "not_found" }
   | { status: "rate_limited" }
   | { status: "error"; message: string };
-
-export interface StudentRow {
-  username: string;
-  profile_url: string;
-  added_at: string;
-  last_searched: string;
-}
